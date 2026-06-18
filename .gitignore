@@ -1,0 +1,33 @@
+# Flutter
+**/build/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/pubspec.lock
+**/.packages
+**/ios/Pods/
+**/ios/.symlinks/
+**/android/.gradle/
+**/android/local.properties
+**/android/key.properties
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.env
+**/venv/
+**/.venv/
+
+# Backend runtime files
+ai/.backend.log
+ai/.backend.pid
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
