@@ -5,7 +5,6 @@ import '../models/exercise_model.dart';
 final _supabase = Supabase.instance.client;
 
 class ExerciseService {
-  /// Exercises kataloğundan tüm egzersizleri getirir.
   static Future<List<ExerciseLibraryModel>> getAllExercises() async {
     final data = await _supabase.from('exercises').select();
     return (data as List)
@@ -13,8 +12,6 @@ class ExerciseService {
         .toList();
   }
 
-  /// Aktif uyarılara göre egzersizleri filtreler.
-  /// warning_keys boş olan egzersizler (genel) her zaman dahil edilir.
   static Future<List<ExerciseLibraryModel>> getExercisesByWarnings(
       List<String> warnings) async {
     if (warnings.isEmpty) return getAllExercises();
@@ -27,9 +24,9 @@ class ExerciseService {
     return all.where((ex) => ex.matchesWarnings(warnings)).toList();
   }
 
-  /// Duruş analiz sonucuna göre exercise_recommendations tablosuna kayıt yazar.
   static Future<List<ExerciseModel>> autoRecommend({
     required String userId,
+    required String sessionId,
     required List<String> activeWarnings,
   }) async {
     if (activeWarnings.isEmpty) return [];
@@ -40,6 +37,8 @@ class ExerciseService {
     final rows = library
         .map((ex) => {
               'user_id': userId,
+              'session_id': sessionId,
+              'exercise_id': ex.id,
               'exercise_name': ex.title,
               'description': ex.youtubeUrl,
             })
@@ -51,6 +50,21 @@ class ExerciseService {
         .select();
 
     return (data as List).map((e) => ExerciseModel.fromMap(e)).toList();
+  }
+
+  static Future<List<ExerciseLibraryModel>> getExercisesForSession(
+      String sessionId) async {
+    final data = await _supabase
+        .from('exercise_recommendations')
+        .select('exercises!exercise_id(*)')
+        .eq('session_id', sessionId);
+
+    return (data as List)
+        .where((r) => r['exercises'] != null)
+        .map((r) => ExerciseLibraryModel.fromMap(
+              r['exercises'] as Map<String, dynamic>,
+            ))
+        .toList();
   }
 
   static Future<List<ExerciseModel>> getUserRecommendations(

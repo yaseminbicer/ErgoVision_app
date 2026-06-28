@@ -8,6 +8,7 @@ import '../services/posture_webrtc_service.dart';
 import '../services/posture_analysis_service.dart';
 import '../services/posture_service.dart';
 import '../services/auth_service.dart';
+import 'session_summary_screen.dart';
 
 class TrackingScreen extends StatefulWidget {
   const TrackingScreen({super.key});
@@ -118,14 +119,11 @@ class _TrackingScreenState extends State<TrackingScreen> {
         userId: userId,
         postureScore: update.postureScore.toDouble(),
         isGoodPosture: update.isGoodPosture,
-        // posture_ratio ve tilt_ratio, derece cinsinden proxy olarak saklanır
         torsoAngle: update.postureRatio * 180,
         neckAngle: update.postureRatio * 180,
         shoulderAngle: (1 - update.shoulderTiltRatio) * 180,
       );
-    } catch (_) {
-      // Snapshot hatası tracking'i durdurmamalı
-    }
+    } catch (_) {}
   }
 
   String get _formattedTime {
@@ -137,29 +135,28 @@ class _TrackingScreenState extends State<TrackingScreen> {
 
   void _togglePause() => setState(() => _isPaused = !_isPaused);
 
-  void _stopTracking() {
+  Future<void> _stopTracking() async {
     _elapsedTimer?.cancel();
     _snapshotTimer?.cancel();
 
-    // Session ve egzersiz önerilerini arka planda bitir
     final sessionId = _sessionId;
     final warnings = List<String>.from(_warnings);
-    if (sessionId != null) {
-      PostureAnalysisService.endSession(
-        sessionId: sessionId,
-        durationSeconds: _elapsedSeconds,
-        activeWarnings: warnings,
-      );
-    }
 
-    Navigator.pop(
+    final summary = await Navigator.push<PostureSessionSummary>(
       context,
-      PostureSessionSummary(
-        ergonomicSeconds: _ergonomicSeconds,
-        nonErgonomicSeconds: _nonErgonomicSeconds,
-        finalWarnings: warnings,
+      MaterialPageRoute(
+        builder: (_) => SessionSummaryScreen(
+          sessionId: sessionId,
+          warnings: warnings,
+          ergonomicSeconds: _ergonomicSeconds,
+          nonErgonomicSeconds: _nonErgonomicSeconds,
+          durationSeconds: _elapsedSeconds,
+        ),
       ),
     );
+
+    if (!mounted) return;
+    Navigator.pop(context, summary);
   }
 
   @override

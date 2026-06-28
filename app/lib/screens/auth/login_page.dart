@@ -20,9 +20,12 @@ class _LoginPageState extends State<LoginPage> {
     final password = _passwordController.text;
 
     if (email.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields')),
-      );
+      _showError('Please fill in all fields.');
+      return;
+    }
+
+    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(email)) {
+      _showError('Please enter a valid email address.');
       return;
     }
 
@@ -39,12 +42,32 @@ class _LoginPageState extends State<LoginPage> {
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Login failed: ${e.toString()}')),
-      );
+      _showError(_authErrorMessage(e));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  String _authErrorMessage(dynamic e) {
+    final msg = e.toString().toLowerCase();
+    if (msg.contains('invalid login credentials') || msg.contains('invalid_credentials')) {
+      return 'Incorrect email or password. Please try again.';
+    } else if (msg.contains('email not confirmed')) {
+      return 'Please verify your email address before logging in.';
+    } else if (msg.contains('too many requests') || msg.contains('rate limit')) {
+      return 'Too many attempts. Please try again later.';
+    } else if (msg.contains('network') || msg.contains('socket') || msg.contains('connection')) {
+      return 'Network error. Please check your connection and try again.';
+    } else if (msg.contains('user not found') || msg.contains('no user')) {
+      return 'No account found with this email address.';
+    }
+    return 'Something went wrong. Please try again.';
   }
 
   @override

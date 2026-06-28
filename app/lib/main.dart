@@ -13,7 +13,7 @@ void main() async {
 
   await Supabase.initialize(
     url: SupabaseConfig.url,
-    anonKey: SupabaseConfig.anonKey, // publishableKey ile aynıdır
+    anonKey: SupabaseConfig.anonKey,
   );
 
   runApp(

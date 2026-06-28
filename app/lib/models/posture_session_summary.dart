@@ -1,11 +1,15 @@
 class PostureSessionSummary {
+  final String? sessionId;
   final int ergonomicSeconds;
   final int nonErgonomicSeconds;
+  final int durationSeconds;
   final List<String> finalWarnings;
 
   const PostureSessionSummary({
+    this.sessionId,
     required this.ergonomicSeconds,
     required this.nonErgonomicSeconds,
+    this.durationSeconds = 0,
     this.finalWarnings = const [],
   });
 

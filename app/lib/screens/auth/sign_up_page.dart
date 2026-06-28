@@ -23,17 +23,23 @@ class _SignUpPageState extends State<SignUpPage> {
     final password = _passwordController.text;
     final confirm = _confirmController.text;
 
-    if (name.isEmpty || email.isEmpty || password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please fill in all fields')),
-      );
+    if (name.isEmpty || email.isEmpty || password.isEmpty || confirm.isEmpty) {
+      _showError('Please fill in all fields.');
+      return;
+    }
+
+    if (!RegExp(r'^[^@]+@[^@]+\.[^@]+').hasMatch(email)) {
+      _showError('Please enter a valid email address.');
+      return;
+    }
+
+    if (password.length < 6) {
+      _showError('Password must be at least 6 characters long.');
       return;
     }
 
     if (password != confirm) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Passwords do not match')),
-      );
+      _showError('Passwords do not match.');
       return;
     }
 
@@ -50,12 +56,32 @@ class _SignUpPageState extends State<SignUpPage> {
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Sign up failed: ${e.toString()}')),
-      );
+      _showError(_authErrorMessage(e));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  String _authErrorMessage(dynamic e) {
+    final msg = e.toString().toLowerCase();
+    if (msg.contains('user already registered') || msg.contains('already registered') || msg.contains('already exists')) {
+      return 'An account with this email already exists.';
+    } else if (msg.contains('password should be at least') || msg.contains('weak_password')) {
+      return 'Password must be at least 6 characters long.';
+    } else if (msg.contains('unable to validate email') || msg.contains('invalid format') || msg.contains('invalid email')) {
+      return 'Please enter a valid email address.';
+    } else if (msg.contains('too many requests') || msg.contains('rate limit')) {
+      return 'Too many attempts. Please try again later.';
+    } else if (msg.contains('network') || msg.contains('socket') || msg.contains('connection')) {
+      return 'Network error. Please check your connection and try again.';
+    }
+    return 'Something went wrong. Please try again.';
   }
 
   @override

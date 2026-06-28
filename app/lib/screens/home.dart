@@ -82,9 +82,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       final list = await ExerciseService.getAllExercises();
       if (!mounted) return;
       setState(() => _exercises = list);
-    } catch (_) {
-      // Supabase bağlantısı yoksa liste boş kalır
-    }
+    } catch (_) {}
   }
 
   Future<void> _loadExercisesByWarnings(List<String> warnings) async {

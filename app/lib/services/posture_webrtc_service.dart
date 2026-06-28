@@ -158,11 +158,8 @@ class PostureWebRTCService {
     try {
       final data = jsonDecode(message.text) as Map<String, dynamic>;
       final update = PostureWarningUpdate.fromJson(data);
-      // Native WebRTC callback'inden Dart event loop'una taşı
       Future.microtask(() => _warningsController.add(update));
-    } catch (_) {
-      // Hatalı JSON gelirse sessizce atla
-    }
+    } catch (_) {}
   }
 
   Future<void> dispose() async {
