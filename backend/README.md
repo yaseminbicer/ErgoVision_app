@@ -1,378 +1,314 @@
+# ErgoVision — Teknik Dokümantasyon
 
 ## Sistem Mimarisi
 
-ErgoVision, ayrı bir backend sunucusu barındırmaz. Flutter uygulaması; Supabase SDK aracılığıyla doğrudan bulut veritabanına, `http` paketi aracılığıyla da AI API'ye bağlanır.
+ErgoVision üç katmanlı bir yapıya sahiptir. Flutter uygulaması; veri kalıcılığı için Supabase'e, gerçek zamanlı duruş analizi için ise WebRTC aracılığıyla bir Python AI servisine bağlanır.
 
 ```
-┌────────────────────────────────────────────────┐
-│              Flutter Uygulaması                │
-│                                                │
-│  ┌──────────┐  ┌─────────────────┐  ┌───────┐ │
-│  │  Models  │  │    Services     │  │  UI   │ │
-│  └──────────┘  └───────┬─────────┘  └───────┘ │
-└──────────────────────── │ ──────────────────────┘
-              ┌───────────┴────────────┐
-              │ HTTPS                  │ HTTPS
-              ▼                        ▼
-┌─────────────────────┐    ┌──────────────────────┐
-│      Supabase       │    │       AI API         │
-│  ┌───────────────┐  │    │  (Pose Estimation)   │
-│  │  Auth (JWT)   │  │    │                      │
-│  ├───────────────┤  │    │  frame → analiz →    │
-│  │  PostgreSQL   │  │    │  açı + skor değerleri│
-│  └───────────────┘  │    └──────────────────────┘
-└─────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                   FLUTTER MOBIL UYGULAMA                     │
+│          Ekranlar / Servisler / Modeller (Dart)              │
+└────────────────┬─────────────────────────┬───────────────────┘
+                 │ WebRTC                  │ HTTPS (Supabase SDK)
+                 │ (video + data channel)  │
+                 ▼                         ▼
+┌───────────────────────┐     ┌────────────────────────────────┐
+│      AI SERVİSİ       │     │           SUPABASE             │
+│  Python / FastAPI     │     │   PostgreSQL + Auth + RLS      │
+│  MediaPipe / aiortc   │     │        (Bulut)                 │
+│  port 8000            │     │                                │
+└───────────────────────┘     └────────────────────────────────┘
 ```
 
 ---
 
-## Proje Dosya Yapısı
+## AI Servisi
 
+**Teknoloji:** Python 3.11, FastAPI, aiortc, MediaPipe Pose Landmarker, OpenCV, Docker
+
+### Endpoint'ler
+
+| Method | Path | Açıklama |
+|---|---|---|
+| `GET` | `/` | Sağlık kontrolü |
+| `POST` | `/offer` | WebRTC SDP offer alır, SDP answer döner |
+
+### Duruş Analizi (`analyzer.py`)
+
+Her frame'de **MediaPipe Pose Landmarker** ile 33 vücut noktası tespit edilir. Analiz 3 temel noktaya dayanır:
+
+- **Landmark 0** — Burun
+- **Landmark 11** — Sol omuz
+- **Landmark 12** — Sağ omuz
+
+**Eğik Omuz tespiti:**
 ```
-ergovision_app/
-├── lib/
-│   ├── main.dart                              # Uygulama giriş noktası
-│   ├── utils/
-│   │   └── supabase_config.dart              # Supabase bağlantı bilgileri
-│   ├── models/
-│   │   ├── user_model.dart                   # Kullanıcı veri modeli
-│   │   ├── session_model.dart                # Oturum veri modeli
-│   │   ├── posture_record_model.dart         # Duruş kaydı ve özet modeli
-│   │   ├── exercise_model.dart               # Egzersiz önerisi modeli
-│   │   └── ai_analysis_result.dart           # AI API'den dönen analiz sonucu
-│   └── services/
-│       ├── auth_service.dart                 # Kimlik doğrulama işlemleri
-│       ├── session_service.dart              # Oturum yönetimi
-│       ├── posture_service.dart              # Duruş kaydı ve analitik
-│       ├── exercise_service.dart             # Egzersiz önerileri
-│       ├── ai_service.dart                   # AI API ile iletişim
-│       └── posture_analysis_service.dart     # AI + Supabase akışını yönetir
-└── pubspec.yaml                              # Bağımlılıklar
-```
-
----
-
-## Sınıflar ve Detaylı Açıklamaları
-
-### `main.dart`
-
-Uygulamanın başladığı dosyadır. Flutter çalışmaya başlamadan önce `Supabase.initialize()` çağrılır; bu sayede uygulama boyunca tüm servisler Supabase'e bağlı kalır. `SupabaseConfig` sınıfından URL ve anonKey okunur. `ErgoVisionApp` widget'ı Material Design temasını ve yeşil renk şemasını tanımlar.
-
----
-
-### `utils/supabase_config.dart`
-
-```dart
-class SupabaseConfig {
-  static const String url = '...';
-  static const String anonKey = '...';
-}
+tilt_ratio = |sol_omuz_y - sağ_omuz_y| / omuz_genişliği
+tilt_ratio > 0.08  →  uyarı: "Uneven Shoulders"
 ```
 
-Supabase proje URL'si ve anonim anahtarını tek bir yerde tutar. Bu dosya `.gitignore`'a eklenmiştir; GitHub'a gönderilmez. Tüm servisler bu bilgileri buradan okur, anahtar değiştiğinde yalnızca bu dosyanın güncellenmesi yeterlidir.
+**Öne Eğilme tespiti:**
+```
+posture_ratio = (omuz_orta_y - burun_y) / omuz_genişliği
+posture_ratio < 0.6  →  uyarı: "Slouching Detected"
+```
 
----
+**Puan hesaplama:**
+```
+skor = max(0, 100 - (uyarı_sayısı × 20))
+```
 
-### `models/user_model.dart`
+### Temporal Smoothing (`webrtc.py`)
 
-#### `UserModel`
+Ham frame analizleri gürültülü olabileceğinden **5 frame'lik kayan pencere** uygulanır. Bir uyarının son 5 frame'in en az 3'ünde görülmesi gerekir.
 
-Supabase `users` tablosundaki bir satırı Dart nesnesine dönüştürür.
+### Data Channel Çıktısı
 
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `id` | `String` | UUID — Supabase Auth'un atadığı benzersiz kimlik |
-| `email` | `String` | Kullanıcının email adresi |
-| `fullName` | `String` | Ad soyad |
-| `createdAt` | `DateTime` | Hesap oluşturulma tarihi |
+Sonuçlar `posture-warnings` adlı WebRTC data channel üzerinden Flutter uygulamasına iletilir:
 
-**`UserModel.fromMap(map)`** — Supabase'den gelen `Map<String, dynamic>` tipindeki ham veriyi `UserModel` nesnesine çevirir. `full_name` alanı veritabanında boş olabileceği için `?? ''` ile varsayılan değer atanır.
-
----
-
-### `models/session_model.dart`
-
-#### `SessionModel`
-
-Kullanıcının bir çalışma oturumunu temsil eder. Kamera açıldığında oturum başlar, kamera kapandığında biter.
-
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `id` | `String` | UUID — Oturum kimliği |
-| `userId` | `String` | Bu oturumun sahibi |
-| `startedAt` | `DateTime` | Oturum başlangıcı |
-| `endedAt` | `DateTime?` | Oturum sonu — `null` ise oturum hâlâ aktif |
-| `durationSeconds` | `int?` | Toplam süre saniye cinsinden |
-
-**`isActive`** (getter) — `endedAt == null` ise `true` döner. Aktif oturum tespitinde kullanılır.
-
-**`formattedDuration`** (getter) — `durationSeconds` değerini `"12dk 34sn"` formatına çevirir. Raporlar ekranında gösterim için kullanılır. Süre henüz kaydedilmemişse `"-"` döner.
-
-**`SessionModel.fromMap(map)`** — Supabase verisini nesneye dönüştürür. `ended_at` alanı `null` olabileceği için null-safe parse işlemi yapılır.
-
----
-
-### `models/posture_record_model.dart`
-
-#### `PostureRecordModel`
-
-AI API'den dönen analiz sonucunun Supabase'e kaydedilmiş halini temsil eder. Her frame analizi sonrası bu modelden yeni bir kayıt oluşturulur.
-
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `id` | `String` | UUID — Kayıt kimliği |
-| `sessionId` | `String` | Hangi oturuma ait olduğu |
-| `userId` | `String` | Hangi kullanıcıya ait olduğu |
-| `postureScore` | `double` | Genel duruş skoru (0–100 arası) |
-| `isGoodPosture` | `bool` | Duruşun iyi olup olmadığı |
-| `torsoAngle` | `double` | Gövde açısı (derece) |
-| `neckAngle` | `double` | Boyun açısı (derece) |
-| `shoulderAngle` | `double` | Omuz açısı (derece) |
-| `recordedAt` | `DateTime` | Ölçümün alındığı zaman |
-
-**`PostureRecordModel.fromMap(map)`** — Supabase'den gelen sayısal değerler `num` tipinde gelebileceği için `.toDouble()` ile açıkça `double`'a çevrilir.
-
-#### `PostureSummary`
-
-Birden fazla `PostureRecordModel` verisinden hesaplanan istatistik özetidir. `PostureService.getSummary()` tarafından üretilir, raporlar ekranında görüntülenir.
-
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `totalRecords` | `int` | Toplam ölçüm sayısı |
-| `goodPostureCount` | `int` | İyi duruş sayısı |
-| `badPostureCount` | `int` | Kötü duruş sayısı |
-| `goodPosturePercentage` | `double` | İyi duruş yüzdesi (0–100) |
-| `averageScore` | `double` | Ortalama duruş skoru |
-
----
-
-### `models/exercise_model.dart`
-
-#### `ExerciseModel`
-
-Kullanıcıya önerilen bir egzersizi temsil eder. `ExerciseService.autoRecommend()` tarafından oluşturulur ve `exercise_recommendations` tablosuna kaydedilir.
-
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `id` | `String` | UUID — Öneri kimliği |
-| `userId` | `String` | Kime önerildiği |
-| `exerciseName` | `String` | Egzersizin adı |
-| `description` | `String` | Nasıl yapılacağının açıklaması |
-| `recommendedAt` | `DateTime` | Önerinin oluşturulma zamanı |
-
-**`ExerciseModel.fromMap(map)`** — `description` alanı veritabanında boş olabileceği için `?? ''` ile boş string varsayılan değer atanır.
-
----
-
-### `models/ai_analysis_result.dart`
-
-#### `AIAnalysisResult`
-
-AI API'nin bir kamera frame'ini analiz etmesi sonucunda döndürdüğü veriyi temsil eder. Supabase'e doğrudan kaydedilmez; `PostureAnalysisService` bu modeli alıp `PostureRecordModel`'e dönüştürerek kaydeder.
-
-| Alan | Tip | Açıklama |
-|---|---|---|
-| `postureScore` | `double` | AI'ın hesapladığı genel duruş skoru (0–100) |
-| `isGoodPosture` | `bool` | AI'ın iyi/kötü duruş kararı |
-| `torsoAngle` | `double` | AI'ın tespit ettiği gövde açısı |
-| `neckAngle` | `double` | AI'ın tespit ettiği boyun açısı |
-| `shoulderAngle` | `double` | AI'ın tespit ettiği omuz açısı |
-
-**`AIAnalysisResult.fromJson(json)`** — AI API'nin döndürdüğü JSON'u Dart nesnesine çevirir. Beklenen JSON formatı:
 ```json
 {
-  "posture_score": 72.5,
-  "is_good_posture": true,
-  "torso_angle": 165.0,
-  "neck_angle": 158.0,
-  "shoulder_angle": 162.0
+  "person_detected": true,
+  "warnings": ["Slouching Detected"],
+  "posture_score": 80,
+  "is_good_posture": false,
+  "shoulder_tilt_ratio": 0.05,
+  "posture_ratio": 0.55
 }
+```
+
+Ham video frame'leri hiçbir zaman saklanmaz; yalnızca analiz sonuçları kaydedilir.
+
+### AI Servisini Başlatma
+
+```bash
+cd ai/
+bash start_backend.sh        # uvicorn'u arka planda port 8000'de başlatır
+```
+
+Docker ile:
+```bash
+docker build -t posture-api .
+docker run -d -p 8000:8000 --name posture-server posture-api
 ```
 
 ---
 
-### `services/auth_service.dart`
+## Flutter Uygulaması — Dosya Yapısı
 
-#### `AuthService`
-
-Kullanıcı kimlik doğrulama işlemlerini yönetir. Supabase Auth servisi ile doğrudan konuşur. JWT token yönetimi (saklama, yenileme, geçersiz kılma) tamamen Supabase SDK tarafından otomatik yapılır.
-
-**`register(email, password, fullName)`**
-1. `supabase.auth.signUp()` ile Supabase Auth sistemine yeni kullanıcı kaydeder
-2. Auth kaydı başarılıysa aynı kullanıcıyı `users` tablosuna da ekler (profil verisi için)
-3. `AuthResponse` nesnesi döner
-
-Kayıt iki adımda yapılmasının sebebi: Supabase Auth yalnızca email ve şifreyi yönetir. Ad-soyad gibi ek profil bilgilerini tutmak için ayrı bir `users` tablosu gereklidir.
-
-**`login(email, password)`**
-1. `supabase.auth.signInWithPassword()` ile kimlik doğrulaması yapar
-2. Başarılıysa içinde JWT access token bulunan `AuthResponse` döner
-3. Token SDK tarafından cihazda güvenli şekilde saklanır
-
-**`logout()`**
-1. `supabase.auth.signOut()` çağırır
-2. Saklanan token silinir ve geçersiz kılınır
-
-**`currentUser`** (getter) — Aktif oturumdaki `User` nesnesini döner, giriş yoksa `null`
-
-**`currentUserId`** (getter) — Aktif kullanıcının UUID'sini döner, giriş yoksa `null`. Servislerde `user_id` parametresi olarak sık kullanılır.
-
-**`authStateChanges`** (getter) — Giriş/çıkış olaylarını yayınlayan `Stream<AuthState>` döner. Frontend bu stream'i dinleyerek kullanıcıyı otomatik olarak doğru ekrana yönlendirir.
-
----
-
-### `services/session_service.dart`
-
-#### `SessionService`
-
-Kullanıcının kamera açık olduğu süreleri (çalışma oturumlarını) yönetir. Her oturum `sessions` tablosunda bir satır olarak saklanır.
-
-**`startSession(userId)`**
-1. `sessions` tablosuna yeni bir kayıt ekler
-2. `started_at` Supabase tarafından otomatik `NOW()` olarak atanır
-3. Oluşturulan `SessionModel` döner
-4. Kamera ekranı açıldığında çağrılır
-
-**`endSession(sessionId, durationSeconds)`**
-1. Verilen `sessionId`'ye sahip oturumu bulur
-2. `ended_at` alanını şimdiki zamanla günceller
-3. `duration_seconds` alanına toplam süreyi yazar
-4. Güncellenmiş `SessionModel` döner
-5. Kamera ekranı kapatıldığında çağrılır
-
-**`getUserSessions(userId)`**
-1. Kullanıcının tüm oturumlarını getirir
-2. `started_at` alanına göre en yeniden eskiye sıralar
-3. `List<SessionModel>` döner
-4. Oturum geçmişi ekranında kullanılır
+```
+app/lib/
+├── main.dart                              # Giriş noktası, Supabase başlatma, auth yönlendirme
+├── utils/
+│   ├── supabase_config.dart              # Supabase URL ve anon key
+│   └── backend_config.dart              # AI servis URL'si
+├── models/
+│   ├── user_model.dart
+│   ├── session_model.dart
+│   ├── posture_record_model.dart
+│   ├── posture_session_summary.dart      # Ekranlar arası geçen oturum özeti
+│   ├── exercise_model.dart               # exercise_recommendations tablosu satırı
+│   ├── exercise_library_model.dart       # exercises kataloğu satırı
+│   └── ai_analysis_result.dart
+├── services/
+│   ├── auth_service.dart
+│   ├── session_service.dart
+│   ├── posture_service.dart
+│   ├── exercise_service.dart
+│   ├── posture_analysis_service.dart     # endSession + autoRecommend orkestratörü
+│   └── posture_webrtc_service.dart       # AI servisine WebRTC bağlantısı
+├── screens/
+│   ├── home.dart
+│   ├── posture_tracking.dart
+│   ├── session_summary_screen.dart
+│   ├── settings.dart
+│   ├── about.dart
+│   ├── privacy.dart
+│   ├── loading.dart
+│   ├── auth/
+│   │   ├── login_page.dart
+│   │   └── sign_up_page.dart
+│   └── onboarding/
+│       └── onboarding_flow.dart
+└── widgets/
+    ├── app_layout.dart                   # Sidebar animasyon sarmalayıcı
+    └── sidebar_widget.dart               # Yan menü
+```
 
 ---
 
-### `services/posture_service.dart`
+## Ekran Akışı
 
-#### `PostureService`
-
-AI analizinden gelen duruş ölçümlerini veritabanına yazar ve istatistik hesaplar.
-
-**`addRecord({sessionId, userId, postureScore, isGoodPosture, torsoAngle, neckAngle, shoulderAngle})`**
-1. Tüm parametreleri alarak `posture_records` tablosuna tek bir ölçüm kaydeder
-2. `recorded_at` Supabase tarafından otomatik `NOW()` olarak atanır
-3. Kaydedilen `PostureRecordModel` döner
-4. Doğrudan değil, `PostureAnalysisService` üzerinden çağrılır
-
-**`getSessionRecords(sessionId)`**
-1. Bir oturuma ait tüm duruş kayıtlarını getirir
-2. `recorded_at` alanına göre eskiden yeniye (kronolojik) sıralar
-3. `List<PostureRecordModel>` döner
-4. Oturum detay ekranında grafik çizmek için kullanılır
-
-**`getSummary(userId)`**
-1. Kullanıcının son 100 kaydını `posture_score` ve `is_good_posture` alanlarıyla çeker
-2. Aşağıdaki istatistikleri hesaplar:
-   - **`totalRecords`**: Toplam kayıt sayısı
-   - **`goodPostureCount`**: `is_good_posture == true` olan kayıt sayısı
-   - **`badPostureCount`**: `totalRecords - goodPostureCount`
-   - **`goodPosturePercentage`**: `(goodCount / total) * 100`
-   - **`averageScore`**: Tüm `posture_score` değerlerinin aritmetik ortalaması
-3. `PostureSummary` nesnesi döner
-4. Ana dashboard ve raporlar ekranında kullanılır
+```
+Uygulama Açılışı
+  ├── Oturum yok   ──► LoginPage / SignUpPage
+  └── Oturum var
+        ├── İlk açılış  ──► OnboardingFlow ──► SignUpPage
+        └── Normal      ──► HomeScreen
+                                  │
+                           [Begin Tracking]
+                                  │
+                          TrackingScreen
+                          (WebRTC canlı yayın)
+                                  │
+                              [Stop]
+                                  │
+                        SessionSummaryScreen
+                        (istatistikler + egzersizler)
+                                  │
+                              [Done]
+                                  │
+                          HomeScreen (güncellenir)
+```
 
 ---
 
-### `services/exercise_service.dart`
+## Servisler
 
-#### `ExerciseService`
+### `AuthService`
 
-Duruş açı değerlerine göre egzersiz önerileri üretir, kaydeder ve yönetir.
+Supabase Auth'u sarar. JWT token saklama ve yenileme SDK tarafından otomatik yönetilir.
 
-**`autoRecommend({userId, postureScore, torsoAngle, neckAngle, shoulderAngle})`**
+| Metot | Açıklama |
+|---|---|
+| `register(email, password, fullName)` | Supabase Auth kullanıcısı oluşturur + `users` tablosuna satır ekler |
+| `login(email, password)` | Şifre ile giriş yapar, `AuthResponse` döner |
+| `logout()` | Çıkış yapar, token silinir |
+| `currentUserId` | Aktif kullanıcının UUID'sini döner |
+| `authStateChanges` | Giriş/çıkış olaylarının Stream'i |
 
-AI'dan dönen açı değerlerine göre aşağıdaki karar mantığını uygular:
+---
 
-| Koşul | Egzersiz | Neden? |
+### `SessionService`
+
+`sessions` tablosundaki satırları yönetir.
+
+| Metot | Açıklama |
+|---|---|
+| `startSession(userId)` | Yeni oturum ekler, `SessionModel` döner |
+| `endSession(sessionId, durationSeconds)` | `ended_at` ve `duration_seconds` günceller |
+| `getUserSessions(userId)` | Tüm oturumları en yeniden eskiye sıralı döner |
+
+---
+
+### `PostureService`
+
+Duruş ölçümlerini `posture_records` tablosuna yazar ve istatistik hesaplar.
+
+| Metot | Açıklama |
+|---|---|
+| `addRecord({...})` | Tek duruş anlık görüntüsü ekler |
+| `getSessionRecords(sessionId)` | Oturuma ait tüm kayıtları kronolojik sırayla döner |
+| `getSummary(userId)` | Son 100 kayıttan `PostureSummary` hesaplar (ort. skor, iyi/kötü %) |
+
+---
+
+### `ExerciseService`
+
+Egzersiz kataloğunu ve oturuma özel önerileri yönetir.
+
+| Metot | Açıklama |
+|---|---|
+| `getAllExercises()` | `exercises` tablosundan tüm kataloğu döner |
+| `getExercisesByWarnings(warnings)` | `warning_keys` eşleşmesine göre filtreler. `warning_keys` boş olanlar her zaman dahil edilir |
+| `autoRecommend({userId, sessionId, activeWarnings})` | Uyarıları egzersizlerle eşleştirir, `exercise_id` FK ile `exercise_recommendations`'a kaydeder |
+| `getExercisesForSession(sessionId)` | Tek JOIN sorgusu: `exercise_recommendations` ⟶ `exercises` (`exercise_id` üzerinden) |
+| `getUserRecommendations(userId)` | Kullanıcının tüm önerilerini döner |
+
+**Egzersiz eşleştirme mantığı:**
+```
+exercises.warning_keys = ["Slouching Detected"]  →  öne eğilme tespit edilince gösterilir
+exercises.warning_keys = ["Uneven Shoulders"]    →  eğik omuz tespit edilince gösterilir
+exercises.warning_keys = []                      →  her zaman gösterilir (genel egzersiz)
+```
+
+---
+
+### `PostureAnalysisService`
+
+Oturum sınırlarında çağrılan orkestrasyon katmanı.
+
+| Metot | Açıklama |
+|---|---|
+| `startSession()` | Mevcut kullanıcı için `SessionService.startSession()` çağırır |
+| `endSession({sessionId, durationSeconds, activeWarnings})` | DB'de oturumu kapatır, ardından `ExerciseService.autoRecommend()` çağırır |
+
+---
+
+### `PostureWebRTCService`
+
+AI servisine WebRTC peer bağlantısını yönetir.
+
+**Bağlantı akışı:**
+1. Kamera izni iste
+2. Google STUN sunucusuyla `RTCPeerConnection` oluştur
+3. Yerel video track'i ekle
+4. `posture-warnings` data channel'ı aç
+5. SDP offer oluştur (`b=AS:2000` bitrate ipucu eklenmiş)
+6. Offer'ı `BackendConfig.aiOfferUrl`'e POST et
+7. SDP answer'ı remote description olarak ayarla
+8. `PostureWarningUpdate` nesnelerini `StreamController` üzerinden yayınla
+
+**`PostureWarningUpdate` alanları:**
+
+| Alan | Tip | Açıklama |
 |---|---|---|
-| `torsoAngle < 160°` | Cat-Cow Stretch | Gövde öne eğilmiş → sırt kasları gergin |
-| `neckAngle < 150°` | Boyun Germe | Boyun öne düşmüş → boyun gerginliği |
-| `shoulderAngle < 160°` | Omuz Açma | Omuzlar içe çökmüş → omuz kasları gergin |
-| `postureScore < 50` | Kısa Yürüyüş Molası | Genel skor düşük → uzun süre kötü oturma |
-
-- Koşulları sağlayan egzersizler bir liste olarak hazırlanır
-- Tüm liste `exercise_recommendations` tablosuna tek seferinde toplu (`insert`) kaydedilir
-- Hiçbir koşul sağlanmazsa boş liste döner (duruş iyidir)
-- `List<ExerciseModel>` döner
-
-**`getUserExercises(userId)`**
-1. Kullanıcıya önerilmiş tüm egzersizleri getirir
-2. En yeniden eskiye sıralar
-3. `List<ExerciseModel>` döner
-
-**`deleteExercise(id)`**
-1. Verilen `id`'ye sahip egzersiz önerisini siler
-2. Kullanıcı tamamladığı egzersizi listeden kaldırmak istediğinde çağrılır
+| `warnings` | `List<String>` | Aktif uyarı etiketleri |
+| `postureScore` | `int` | 0–100 |
+| `isGoodPosture` | `bool` | Uyarı listesi boşsa true |
+| `personDetected` | `bool` | Kişi frame dışındaysa false |
+| `shoulderTiltRatio` | `double` | AI'dan gelen ham tilt oranı |
+| `postureRatio` | `double` | AI'dan gelen ham boyun-yükseklik oranı |
 
 ---
 
-### `services/ai_service.dart`
+## Modeller
 
-#### `AIService`
+### `PostureSessionSummary`
 
-Kameradan alınan frame'i AI API'ye HTTP üzerinden gönderir ve analiz sonucunu döner. Yalnızca AI ile iletişimden sorumludur; veritabanı işlemi yapmaz.
+`TrackingScreen`'den `SessionSummaryScreen` üzerinden `HomeScreen`'e taşınan bellek içi sonuç nesnesi.
 
-**`analyzeFrame(imageBytes)`**
-1. `Uint8List` tipinde kamera frame'ini alır
-2. `Content-Type: application/octet-stream` header'ıyla AI API'ye HTTP POST isteği atar
-3. API `200 OK` dönerse yanıtı `AIAnalysisResult.fromJson()` ile parse eder
-4. `AIAnalysisResult` döner
-5. API erişilemezse veya hata dönerse `Exception` fırlatır
+| Alan | Tip |
+|---|---|
+| `sessionId` | `String?` |
+| `ergonomicSeconds` | `int` |
+| `nonErgonomicSeconds` | `int` |
+| `durationSeconds` | `int` |
+| `finalWarnings` | `List<String>` |
 
-AI modeli tamamlandığında `_aiApiUrl` sabitine URL yazılması yeterlidir; başka değişiklik gerekmez.
+Hesaplanan getter'lar: `ergonomicPercentage`, `nonErgonomicPercentage`, `totalSeconds`
 
 ---
 
-### `services/posture_analysis_service.dart`
+### `ExerciseLibraryModel`
 
-#### `PostureAnalysisService`
+`exercises` kataloğu tablosundan bir satır.
 
-`AIService`, `PostureService` ve `ExerciseService`'i tek bir akışta birbirine bağlayan orkestrasyon servisidir. UI yalnızca bu servis ile konuşur; diğer servisleri doğrudan çağırmasına gerek yoktur.
+| Alan | Tip |
+|---|---|
+| `id` | `String` |
+| `title` | `String` |
+| `imagePath` | `String` |
+| `youtubeUrl` | `String` |
+| `warningKeys` | `List<String>` |
 
-**`analyzeAndSave({imageBytes, sessionId, userId})`**
+`matchesWarnings(activeWarnings)` — herhangi bir uyarı anahtarı eşleşirse veya `warningKeys` boşsa `true` döner.
 
-Kameradan gelen frame için uçtan uca analiz ve kayıt işlemini yönetir:
+---
 
-```
-imageBytes
-    │
-    ▼
-AIService.analyzeFrame()         → AI API'ye gönderir
-    │ AIAnalysisResult
-    ▼
-PostureService.addRecord()       → Supabase'e kaydeder
-    │ PostureRecordModel
-    ▼
-UI'ya döner (ekranda gösterilir)
-```
+### `ExerciseModel`
 
-**`recommendExercises({result, userId})`**
+`exercise_recommendations` tablosundan bir satır.
 
-Kötü duruş tespit edildiğinde çağrılır. `AIAnalysisResult` içindeki açı değerlerini `ExerciseService.autoRecommend()`'e iletir ve önerileri Supabase'e kaydeder.
-
-**UI Kullanım Örneği:**
-```dart
-// Kameradan frame geldiğinde
-final record = await PostureAnalysisService.analyzeAndSave(
-  imageBytes: frameBytes,
-  sessionId: activeSessionId,
-  userId: AuthService.currentUserId!,
-);
-
-// Kötü duruşsa egzersiz öner
-if (!record.isGoodPosture) {
-  await PostureAnalysisService.recommendExercises(
-    result: aiResult,
-    userId: AuthService.currentUserId!,
-  );
-}
-```
+| Alan | Tip |
+|---|---|
+| `id` | `String` |
+| `userId` | `String` |
+| `sessionId` | `String?` |
+| `exerciseId` | `String?` |
+| `exerciseName` | `String` |
+| `description` | `String` |
+| `recommendedAt` | `DateTime` |
 
 ---
 
@@ -380,77 +316,93 @@ if (!record.isGoodPosture) {
 
 ```
 users
-├── id (UUID, PK) ──── auth.users.id
-├── email (TEXT)
-├── full_name (TEXT)
-└── created_at (TIMESTAMPTZ)
+├── id           UUID  PK  ──── auth.users.id
+├── email        TEXT
+├── full_name    TEXT
+└── created_at   TIMESTAMPTZ
 
 sessions
-├── id (UUID, PK)
-├── user_id (UUID, FK) ──── users.id
-├── started_at (TIMESTAMPTZ)
-├── ended_at (TIMESTAMPTZ, nullable)
-└── duration_seconds (INTEGER, nullable)
+├── id               UUID  PK
+├── user_id          UUID  FK ──── users.id
+├── started_at       TIMESTAMPTZ
+├── ended_at         TIMESTAMPTZ  nullable
+└── duration_seconds INTEGER      nullable
 
 posture_records
-├── id (UUID, PK)
-├── session_id (UUID, FK) ──── sessions.id
-├── user_id (UUID, FK) ──── users.id
-├── posture_score (NUMERIC)
-├── is_good_posture (BOOLEAN)
-├── torso_angle (NUMERIC)
-├── neck_angle (NUMERIC)
-├── shoulder_angle (NUMERIC)
-└── recorded_at (TIMESTAMPTZ)
+├── id              UUID  PK
+├── session_id      UUID  FK ──── sessions.id
+├── user_id         UUID  FK ──── users.id
+├── posture_score   NUMERIC
+├── is_good_posture BOOLEAN
+├── torso_angle     NUMERIC
+├── neck_angle      NUMERIC
+├── shoulder_angle  NUMERIC
+└── recorded_at     TIMESTAMPTZ
+
+exercises  (salt okunur katalog)
+├── id           UUID  PK
+├── title        TEXT
+├── image_path   TEXT
+├── youtube_url  TEXT
+└── warning_keys TEXT[]
 
 exercise_recommendations
-├── id (UUID, PK)
-├── user_id (UUID, FK) ──── users.id
-├── exercise_name (TEXT)
-├── description (TEXT)
-└── recommended_at (TIMESTAMPTZ)
+├── id              UUID  PK
+├── user_id         UUID  FK ──── users.id
+├── session_id      UUID  FK ──── sessions.id
+├── exercise_id     UUID  FK ──── exercises.id
+├── exercise_name   TEXT
+├── description     TEXT
+└── recommended_at  TIMESTAMPTZ
 ```
 
 ---
 
-## Tipik Kullanım Akışı
+## Uçtan Uca Oturum Akışı
 
 ```
-1. Kullanıcı kayıt olur
-   └── AuthService.register(email, password, fullName)
+1. [Begin Tracking]
+   PostureAnalysisService.startSession()
+   → sessions tablosuna INSERT
 
-2. Kullanıcı giriş yapar
-   └── AuthService.login(email, password)
+2. WebRTC el sıkışması
+   POST /offer → SDP answer
+   → video akışı başlar
 
-3. Kamera açılır, oturum başlar
-   └── SessionService.startSession(userId)
+3. Her frame (30 fps, WebRTC data channel):
+   AI landmark tespiti → uyarı hesaplama → 5-frame smoothing → JSON
 
-4. Her kamera frame'i için analiz yapılır ve kaydedilir
-   └── PostureAnalysisService.analyzeAndSave(imageBytes, sessionId, userId)
-        ├── AIService.analyzeFrame()         → AI API'ye gönderilir
-        └── PostureService.addRecord()       → Supabase'e kaydedilir
+4. Her 10 saniyede bir (kişi frame'deyse):
+   PostureService.addRecord()
+   → posture_records tablosuna INSERT
 
-5. Kötü duruş tespit edilirse egzersiz önerilir
-   └── PostureAnalysisService.recommendExercises(result, userId)
-        └── ExerciseService.autoRecommend() → Supabase'e kaydedilir
+5. Oturum boyunca uyarı birikimi:
+   _sessionWarnings (Set<String>) tüm unique uyarıları toplar
 
-6. Kamera kapanır, oturum biter
-   └── SessionService.endSession(sessionId, durationSeconds)
+6. [Stop]
+   → SessionSummaryScreen açılır (sessionId + _sessionWarnings geçer)
 
-7. Raporlar ekranında özet görüntülenir
-   └── PostureService.getSummary(userId)
+7. SessionSummaryScreen.initState():
+   PostureAnalysisService.endSession()
+   → sessions tablosu UPDATE (ended_at, duration_seconds)
+   → ExerciseService.autoRecommend()
+      → exercise_recommendations tablosuna INSERT (exercise_id FK ile)
 
-8. Egzersizler ekranında öneriler listelenir
-   └── ExerciseService.getUserExercises(userId)
+   ExerciseService.getExercisesForSession()
+   → exercise_recommendations JOIN exercises ON exercise_id
+     WHERE session_id = ?  (tek sorgu)
+
+8. [Done]
+   → PostureSessionSummary HomeScreen'e döner
+   → HomeScreen özet grafiği ve egzersiz listesini günceller
 ```
 
 ---
-
 
 ## Güvenlik
 
-- Tüm tablolarda **Row Level Security (RLS)** aktiftir
-- Her kullanıcı yalnızca kendi verilerine erişebilir
-- Ham video/frame verisi Supabase'e hiçbir zaman gönderilmez; yalnızca AI'dan dönen açı ve skor değerleri kaydedilir
-- `supabase_config.dart` dosyası `.gitignore`'a eklenmiştir
-- Kimlik doğrulama JWT token tabanlıdır, Supabase tarafından otomatik yönetilir
+- Tüm tablolarda **Row Level Security (RLS)** aktiftir — kullanıcılar yalnızca kendi verilerine erişebilir
+- **JWT kimlik doğrulaması** Supabase Flutter SDK tarafından otomatik yönetilir
+- **Ham video frame'leri hiçbir zaman saklanmaz** — yalnızca AI analiz sonuçları (skor, uyarılar) kaydedilir
+- `supabase_config.dart` `.gitignore` ile versiyon kontrolünden hariç tutulmuştur
+- AI servisi geliştirme aşamasında yerel ağda çalışır; yalnızca Supabase endpoint'i buluta açıktır
