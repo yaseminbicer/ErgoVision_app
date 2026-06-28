@@ -36,6 +36,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
 
   // Latest posture data from AI
   List<String> _warnings = [];
+  final Set<String> _sessionWarnings = {};
   bool _isPostureCorrect = true;
   bool _personDetected = false;
   int _currentScore = 0;
@@ -67,6 +68,9 @@ class _TrackingScreenState extends State<TrackingScreen> {
             _warnings = update.personDetected
                 ? update.warnings
                 : [];
+            if (update.personDetected) {
+              _sessionWarnings.addAll(update.warnings);
+            }
             _isPostureCorrect = update.isPostureCorrect;
             _currentScore = update.postureScore;
           });
@@ -140,7 +144,7 @@ class _TrackingScreenState extends State<TrackingScreen> {
     _snapshotTimer?.cancel();
 
     final sessionId = _sessionId;
-    final warnings = List<String>.from(_warnings);
+    final warnings = _sessionWarnings.toList();
 
     final summary = await Navigator.push<PostureSessionSummary>(
       context,

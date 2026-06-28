@@ -6,6 +6,8 @@ import '../screens/home.dart';
 import '../screens/settings.dart';
 import '../screens/about.dart';
 import '../screens/privacy.dart';
+import '../screens/auth/login_page.dart';
+import '../services/auth_service.dart';
 
 class SidebarWidget extends StatelessWidget {
   final String currentPage;
@@ -111,10 +113,81 @@ class SidebarWidget extends StatelessWidget {
                     );
                   },
                 ),
+
+                const Spacer(),
+
+                /// Log Out
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 24),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.logout,
+                        color: Color(0xFFB00020),
+                      ),
+                      title: Text(
+                        "Log Out",
+                        style: GoogleFonts.montserrat(
+                          fontWeight: FontWeight.w600,
+                          color: const Color(0xFFB00020),
+                        ),
+                      ),
+                      onTap: () => _confirmLogout(context),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  void _confirmLogout(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Log Out',
+          style: GoogleFonts.montserrat(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          'Are you sure you want to log out?',
+          style: GoogleFonts.montserrat(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              'Cancel',
+              style: GoogleFonts.montserrat(color: Colors.black54),
+            ),
+          ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await AuthService.logout();
+              if (context.mounted) {
+                Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const LoginPage()),
+                  (route) => false,
+                );
+              }
+            },
+            child: Text(
+              'Log Out',
+              style: GoogleFonts.montserrat(
+                color: const Color(0xFFB00020),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

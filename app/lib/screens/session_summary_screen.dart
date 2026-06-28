@@ -299,26 +299,29 @@ class _SessionSummaryScreenState extends State<SessionSummaryScreen> {
           ),
         ),
         const SizedBox(height: 10),
-        if (_exercises.isEmpty)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.82),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Text(
-              'Great job! No specific exercises needed for this session.',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.montserrat(
-                fontSize: 13,
-                color: Colors.black54,
-              ),
-            ),
-          )
+        if (_exercises.isNotEmpty)
+          ..._exercises.map((ex) => _exerciseCard(ex))
+        else if (_goodPosturePercent == 100)
+          _emptyCard('Great job! No specific exercises needed for this session.')
         else
-          ..._exercises.map((ex) => _exerciseCard(ex)),
+          _emptyCard('No exercises could be found for this session.'),
       ],
+    );
+  }
+
+  Widget _emptyCard(String message) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.82),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Text(
+        message,
+        textAlign: TextAlign.center,
+        style: GoogleFonts.montserrat(fontSize: 13, color: Colors.black54),
+      ),
     );
   }
 
