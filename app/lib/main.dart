@@ -28,15 +28,12 @@ class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   Future<_AppStartState> _resolveStartState() async {
-    final session = Supabase.instance.client.auth.currentSession;
-    if (session == null) return _AppStartState.login;
-
     final prefs = await SharedPreferences.getInstance();
     final seen = prefs.getBool('seenOnboarding') ?? false;
-    if (!seen) {
-      await prefs.setBool('seenOnboarding', true);
-      return _AppStartState.onboarding;
-    }
+    if (!seen) return _AppStartState.onboarding;
+
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session == null) return _AppStartState.login;
     return _AppStartState.home;
   }
 
